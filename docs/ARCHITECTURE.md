@@ -16,8 +16,9 @@ flowchart TD
     H -->|Não: pull request| I[Fim da validação]
     H -->|Sim| J[Build amd64 e arm64]
     J --> K[Publicar GHCR com tag SHA e digest]
-    K --> L{ENABLE_ORACLE_DEPLOY=true?}
-    L -->|Não| M[Deploy skipped]
+    K --> ENV[Entrar no environment production]
+    ENV --> L{Secret ou variable ENABLE_ORACLE_DEPLOY=true?}
+    L -->|Não| M[SSH skipped com motivo no resumo]
     L -->|Sim| N[SSH com chave e host conhecido]
     N --> O[Upload Compose, Caddyfile e script]
     O --> P[Lock, login temporário GHCR e pull por digest]

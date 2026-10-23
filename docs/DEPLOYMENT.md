@@ -10,7 +10,7 @@ A pipeline está em **um único arquivo**, `.github/workflows/pipeline.yml`. O d
 4. O script remoto puxa as imagens, para o único processo da aplicação, faz backup do volume se ele já existir, inicia os serviços e exige healthcheck e resposta da landing page. Só então atualiza o link `current`.
 5. Se a troca falhar, tenta iniciar a imagem anterior e mantém o job com falha. O rollback não substitui banco nem configurações compartilhadas.
 
-A publicação de uma imagem não significa que houve deploy. Sem habilitar a variável, o job de deploy fica **skipped**. A concorrência do workflow e `flock` na VM impedem dois deploys simultâneos; execuções em curso não são canceladas no meio do backup. Existe uma breve indisponibilidade durante backup e troca, necessária para preservar um único escritor SQLite/sessão WhatsApp.
+A publicação de uma imagem não significa que houve deploy. Sem habilitar a variável, o job entra no environment e registra explicitamente a desativação; as etapas SSH ficam **skipped**. A concorrência do workflow e `flock` na VM impedem dois deploys simultâneos; execuções em curso não são canceladas no meio do backup. Existe uma breve indisponibilidade durante backup e troca, necessária para preservar um único escritor SQLite/sessão WhatsApp.
 
 ## Secrets e variables do GitHub
 
@@ -22,12 +22,12 @@ Cadastre em Settings → Secrets and variables → Actions. Crie também o envir
 | `ORACLE_USER` | Secret em `production` | Usuário Linux, por exemplo `ubuntu` ou `opc` |
 | `ORACLE_SSH_PRIVATE_KEY` | Secret em `production` | Chave privada SSH dedicada, formato OpenSSH, sem passphrase para execução automática |
 | `ORACLE_SSH_KNOWN_HOSTS` | Secret em `production` | Linha(s) conhecidas do servidor, verificadas por um canal confiável; porta não padrão usa `[host]:porta` |
-| `ENABLE_ORACLE_DEPLOY` | **Repository variable** | `true` habilita deploy; ausente ou outro valor mantém somente CI/publicação |
-| `ORACLE_SSH_PORT` | Repository/environment variable | Porta SSH; padrão `22` |
-| `ORACLE_DEPLOY_PATH` | Repository/environment variable | Diretório absoluto da aplicação; padrão `/opt/bible-daily-events`, sem espaços ou `..` |
+| `ENABLE_ORACLE_DEPLOY` | **Secret ou variable em `production`**; repository variable também aceita | `true` habilita o SSH. O secret tem prioridade; `false`/ausente desabilita e gera resumo explícito; valor inválido falha com diagnóstico |
+| `ORACLE_SSH_PORT` | Repository/environment variable ou secret | Porta SSH; padrão `22` |
+| `ORACLE_DEPLOY_PATH` | Repository/environment variable ou secret | Diretório absoluto da aplicação; padrão `/opt/bible-daily-events`, sem espaços ou `..` |
 | `GITHUB_TOKEN` | Automático do Actions | `packages:write` para publicar e `packages:read` no deploy; não criar PAT adicional |
 
-O job só pode consultar `ENABLE_ORACLE_DEPLOY` no nível de repositório/organização, porque decide iniciar antes de entrar no environment. O token GHCR passa por stdin via SSH, nunca em argumento, é guardado em configuração Docker temporária na VM e apagado ao sair. O material SSH do runner também é removido. O script não usa `StrictHostKeyChecking=no` nem obtém confiança automaticamente com `ssh-keyscan` durante o deploy. Se usar `ssh-keyscan` na preparação, confira sua fingerprint com o console/administrador da VM antes de cadastrar o resultado.
+O job de deploy entra em `production` somente para publicação na `main`; depois a etapa `Resolve deployment activation` consulta `secrets.ENABLE_ORACLE_DEPLOY` e, na ausência dele, `vars.ENABLE_ORACLE_DEPLOY`. Assim, o secret cadastrado na seção Environment secrets é aceito sem precisar movê-lo. A decisão não pode ficar no `if` do job, porque ali os secrets do environment ainda não estão disponíveis. Nomes de environments no GitHub não diferenciam maiúsculas e minúsculas: `Production` da interface corresponde a `production` do YAML. O token GHCR passa por stdin via SSH, nunca em argumento, é guardado em configuração Docker temporária na VM e apagado ao sair. O material SSH do runner também é removido. O script não usa `StrictHostKeyChecking=no` nem obtém confiança automaticamente com `ssh-keyscan` durante o deploy. Se usar `ssh-keyscan` na preparação, confira sua fingerprint com o console/administrador da VM antes de cadastrar o resultado.
 
 O pacote GHCR herda as permissões do repositório quando criado pela pipeline. Se já existir, permita acesso de leitura/escrita a este repositório nas configurações do pacote. Políticas da organização podem exigir habilitar publicação de packages. A imagem incorpora código, dependências de produção e arquivos públicos; não contém `.env`, banco, sessão WhatsApp ou chaves SSH.
 
@@ -119,7 +119,7 @@ O Compose fixa `NODE_ENV=production`, `PORT=3000`, `DATA_DIR=/app/data`, `EVENT_
 ## Primeira publicação, operação e rollback
 
 1. Cadastre os secrets/variables e os arquivos `shared` da VM. Deixe `WHATSAPP_ENABLED=false` para o primeiro smoke test.
-2. Habilite `ENABLE_ORACLE_DEPLOY=true` no repositório e execute o workflow em `main`.
+2. Habilite `ENABLE_ORACLE_DEPLOY=true` no environment como secret ou variable e execute o workflow em `main`.
 3. Confira no Actions o digest publicado e o resultado do deploy. Valide externamente `https://<domínio>/health` e a landing page, inclusive o certificado; o smoke remoto interno não verifica DNS/ACME nem serviços externos.
 4. Habilite as integrações gradualmente e recrie o contêiner após alterar `app.env`. A autenticação do WhatsApp exige pareamento no terminal privado da VM: use os logs do serviço localmente; não copie QR/sessão para logs públicos do Actions. `/health` deve informar `connected`, e um usuário de teste deve concluir a jornada.
 
@@ -143,3 +143,14 @@ Para rollback manual, registre o digest de uma release anterior, confira compati
 ## Limites da validação
 
 O pipeline valida HTTP e persistência, mas não afirma que o WhatsApp está pareado ou que pagamentos reais funcionam. Faltam credenciais e VM para executar SSH/ACME neste ambiente. Homologação externa, recurring PagBank, chargeback e demais limitações funcionais continuam descritos no README. Consulte [TESTING.md](TESTING.md) e [ARCHITECTURE.md](ARCHITECTURE.md).
+
+
+## Diagnosticar uma execução que não chega ao SSH
+
+Na versão atual, `Resolve deployment activation` deve aparecer no job de deploy. Com o secret `ENABLE_ORACLE_DEPLOY=true` em `Production`, as etapas `Configure verified SSH` e `Upload release and deploy` passam a ser executadas. A execução manual precisa selecionar `main` e as etapas de validação/imagem precisam passar primeiro.
+
+Se o job inteiro não executar, confira a branch, os jobs dos quais depende e as regras de aprovação do environment. Se a ativação estiver desabilitada, o resumo informa isso; uma falha nas etapas seguintes já mostra o campo de configuração ou pré-requisito ausente. A configuração SSH valida a chave privada, normaliza CRLF e exige known_hosts correspondente ao host e porta. Nenhuma verificação de autenticidade foi desligada.
+
+Depois da autenticação, o workflow confere acesso ao Docker, plugin Compose, diretório de deploy e os três arquivos `shared` antes de copiar/iniciar a release. Esses arquivos na VM são diferentes dos secrets SSH do GitHub. O código não sobrescreve arquivos de ambiente da aplicação para tentar contornar sua ausência.
+
+Uma execução antiga usa o workflow do commit antigo. Para aplicar a correção, use a execução disparada pelo novo commit ou **Run workflow → main**; reexecutar os jobs da execução antiga não carrega o YAML corrigido. Consulte o resumo da nova execução e a primeira etapa com erro para distinguir ativação, chave/host, rede SSH, permissões Docker e configuração da aplicação.

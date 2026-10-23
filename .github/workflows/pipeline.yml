@@ -40,8 +40,8 @@ jobs:
         run: npm run build
       - name: Validate shell scripts
         run: |
-          bash -n scripts/container-smoke.sh deploy/remote-deploy.sh
-          shellcheck scripts/container-smoke.sh deploy/remote-deploy.sh
+          bash -n scripts/*.sh deploy/remote-deploy.sh
+          shellcheck scripts/*.sh deploy/remote-deploy.sh
 
   image:
     name: Container smoke test and multiarch publication
@@ -110,8 +110,7 @@ jobs:
     name: Deploy via SSH to Oracle VM
     needs: image
     if: >-
-      github.ref == 'refs/heads/main'
-      && vars.ENABLE_ORACLE_DEPLOY == 'true'
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: production
@@ -121,31 +120,48 @@ jobs:
     env:
       ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
       ORACLE_USER: ${{ secrets.ORACLE_USER }}
-      ORACLE_SSH_PORT: ${{ vars.ORACLE_SSH_PORT || '22' }}
-      DEPLOY_PATH: ${{ vars.ORACLE_DEPLOY_PATH || '/opt/bible-daily-events' }}
       RELEASE_ID: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       IMAGE_REF: ${{ needs.image.outputs.reference }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Configure verified SSH
+      # Environment-scoped secrets/variables exist here, not in the job-level if.
+      - name: Resolve deployment activation
+        id: activation
         env:
+          DEPLOY_ENABLED: ${{ secrets.ENABLE_ORACLE_DEPLOY || vars.ENABLE_ORACLE_DEPLOY || 'false' }}
+        run: bash scripts/resolve-deploy-gate.sh
+      - name: Configure verified SSH
+        if: steps.activation.outputs.deploy == 'enabled'
+        env:
+          ORACLE_SSH_PORT: ${{ secrets.ORACLE_SSH_PORT || vars.ORACLE_SSH_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.ORACLE_DEPLOY_PATH || vars.ORACLE_DEPLOY_PATH || '/opt/bible-daily-events' }}
           SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
           SSH_KNOWN_HOSTS: ${{ secrets.ORACLE_SSH_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          [[ "$ORACLE_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
-          [[ "$ORACLE_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]]
-          [[ "$ORACLE_SSH_PORT" =~ ^[0-9]+$ ]] && (( ORACLE_SSH_PORT > 0 && ORACLE_SSH_PORT <= 65535 ))
-          [[ "$DEPLOY_PATH" =~ ^/[a-zA-Z0-9_/-]+$ && "$DEPLOY_PATH" != / && "$DEPLOY_PATH" != *..* ]]
-          [[ -n "$SSH_PRIVATE_KEY" && -n "$SSH_KNOWN_HOSTS" && -n "$IMAGE_REF" ]]
+          fail() { echo "::error::$1" >&2; exit 2; }
+          [[ "$ORACLE_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || fail 'ORACLE_HOST ausente ou inválido: use apenas IP/hostname, sem https:// ou porta.'
+          [[ "$ORACLE_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || fail 'ORACLE_USER ausente ou inválido no environment production.'
+          [[ "$ORACLE_SSH_PORT" =~ ^[0-9]{1,5}$ ]] || fail 'ORACLE_SSH_PORT precisa ser uma porta numérica.'
+          (( 10#$ORACLE_SSH_PORT > 0 && 10#$ORACLE_SSH_PORT <= 65535 )) || fail 'ORACLE_SSH_PORT fora do intervalo 1–65535.'
+          ORACLE_SSH_PORT=$((10#$ORACLE_SSH_PORT))
+          [[ "$DEPLOY_PATH" =~ ^/[a-zA-Z0-9_/-]+$ && "$DEPLOY_PATH" != / && "$DEPLOY_PATH" != *..* ]] || fail 'ORACLE_DEPLOY_PATH precisa ser um caminho absoluto, sem espaços ou .. .'
+          [[ -n "$SSH_PRIVATE_KEY" ]] || fail 'ORACLE_SSH_PRIVATE_KEY não está disponível neste environment.'
+          [[ -n "$SSH_KNOWN_HOSTS" ]] || fail 'ORACLE_SSH_KNOWN_HOSTS não está disponível neste environment.'
+          [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || fail 'A etapa image não retornou um digest GHCR válido.'
           install -m 700 -d "$RUNNER_TEMP/oracle-ssh"
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/oracle-ssh/key"
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/oracle-ssh/known_hosts"
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > "$RUNNER_TEMP/oracle-ssh/key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" | tr -d '\r' > "$RUNNER_TEMP/oracle-ssh/known_hosts"
           chmod 600 "$RUNNER_TEMP/oracle-ssh/"*
-          ssh-keygen -l -f "$RUNNER_TEMP/oracle-ssh/known_hosts" > /dev/null
+          ssh-keygen -y -P '' -f "$RUNNER_TEMP/oracle-ssh/key" > /dev/null || fail 'Chave privada SSH inválida ou protegida por passphrase; use a chave privada OpenSSH completa.'
+          known_host="$ORACLE_HOST"
+          if [[ "$ORACLE_SSH_PORT" != 22 ]]; then known_host="[$ORACLE_HOST]:$ORACLE_SSH_PORT"; fi
+          ssh-keygen -F "$known_host" -f "$RUNNER_TEMP/oracle-ssh/known_hosts" > /dev/null || fail 'ORACLE_SSH_KNOWN_HOSTS não contém a entrada do host/porta configurados.'
+          printf 'ORACLE_SSH_PORT=%s\nDEPLOY_PATH=%s\n' "$ORACLE_SSH_PORT" "$DEPLOY_PATH" >> "$GITHUB_ENV"
       - name: Upload release and deploy
+        if: steps.activation.outputs.deploy == 'enabled'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
@@ -154,6 +170,21 @@ jobs:
           ssh_options=(-i "$RUNNER_TEMP/oracle-ssh/key" -o "UserKnownHostsFile=$RUNNER_TEMP/oracle-ssh/known_hosts" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
           target="$ORACLE_USER@$ORACLE_HOST"
           release="$DEPLOY_PATH/releases/$RELEASE_ID"
+          echo 'Validando autenticação SSH e pré-requisitos na VM Oracle...'
+          ssh "${ssh_options[@]}" -p "$ORACLE_SSH_PORT" "$target" "bash -s -- '$DEPLOY_PATH'" <<'REMOTE'
+          set -euo pipefail
+          root=$1
+          for tool in docker python3 flock; do
+            command -v "$tool" >/dev/null || { echo "Pré-requisito ausente na VM: $tool" >&2; exit 2; }
+          done
+          docker info >/dev/null 2>&1 || { echo 'O usuário SSH não consegue acessar o Docker. Confira o serviço e a permissão do grupo docker.' >&2; exit 2; }
+          docker compose version >/dev/null || { echo 'Plugin Docker Compose indisponível na VM.' >&2; exit 2; }
+          [[ -d "$root" && -w "$root" ]] || { echo 'Diretório de deploy ausente ou sem permissão de escrita. Prepare ORACLE_DEPLOY_PATH conforme docs/DEPLOYMENT.md.' >&2; exit 2; }
+          for file in app.env compose.env event-sources.json; do
+            [[ -r "$root/shared/$file" ]] || { echo "Configure o arquivo shared/$file na VM conforme docs/DEPLOYMENT.md." >&2; exit 2; }
+          done
+          echo 'SSH autenticado e pré-requisitos da VM conferidos.'
+          REMOTE
           ssh "${ssh_options[@]}" -p "$ORACLE_SSH_PORT" "$target" "umask 077; mkdir -p '$release/deploy'"
           scp "${ssh_options[@]}" -P "$ORACLE_SSH_PORT" docker-compose.yml "$target:$release/docker-compose.yml"
           scp "${ssh_options[@]}" -P "$ORACLE_SSH_PORT" deploy/Caddyfile deploy/remote-deploy.sh "$target:$release/deploy/"

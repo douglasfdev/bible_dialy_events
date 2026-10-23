@@ -19,6 +19,7 @@ npm run build
 | Arquivo | Evidência exigida |
 | --- | --- |
 | `tests/subscription-access.test.ts` | Primeiro contato, texto exato, número do pagamento no privado, conciliação, renovação, pagamento de outro usuário/vencido, limite de consultas, falha do provedor, ausência de contato, cooldown, expiração na fila e auditoria dos membros antes do versículo |
+| `tests/deploy-activation.test.ts` | Ativação pelo secret do environment, flags true/false/ausente/inválida, proteção da branch, chave SSH real com CRLF, host ausente e known_hosts incompatível |
 | `tests/deployment.test.ts` | Shell remoto real com Docker controlado: backup antes da troca, avanço de release só após saúde, rollback com falha preservada, limpeza do token e configuração obrigatória antes de parar o app |
 | `tests/payments.test.ts` | Fallback antes de cobrança, coalescência de chamadas concorrentes, checkout reutilizado, timeout pendente após reinício, titularidade da assinatura, eventos duplicados, valores/moeda canônicos, HMAC Mercado Pago, assinatura PagBank, cancelamento e expiração |
 | `tests/bot.test.ts` | Respostas só em DM, exclusão no grupo quando permitida, bloqueio para não assinantes, localização apenas em sessão pendente, exclusão de histórico, limites e delays de 2–5 s, disparo só para grupo/admin e remoção após reconexão |
@@ -30,8 +31,8 @@ O teste `failed daily send...` imprime intencionalmente a mensagem de falha de e
 ## 2. Validar pipeline e scripts
 
 ```bash
-bash -n deploy/remote-deploy.sh scripts/container-smoke.sh
-shellcheck deploy/remote-deploy.sh scripts/container-smoke.sh
+bash -n deploy/remote-deploy.sh scripts/*.sh
+shellcheck deploy/remote-deploy.sh scripts/*.sh
 # Opcional local; também valida referências e sintaxe do workflow:
 actionlint .github/workflows/pipeline.yml
 ```
@@ -99,7 +100,7 @@ Validação local de referência desta implementação (23/10/2026):
 
 | Verificação | Resultado |
 | --- | --- |
-| `npm run check` | 48 testes passaram; 0 falhos, cancelados ou skipped; tipagem e compilação aprovadas |
+| `npm run check` | 55 testes passaram; 0 falhos, cancelados ou skipped; tipagem e compilação aprovadas |
 | `actionlint`, `bash -n`, ShellCheck | Aprovados para o workflow e scripts |
 | Dockerfile, arquitetura amd64 | Imagem compilada com a CA confiável do proxy fornecida por secret de build; TLS permaneceu ativo |
 | Smoke Docker Compose | Caddy válido, HTTP aprovado, persistência após recriação, usuário não root, backup/restauração e integridade SQLite aprovados |
