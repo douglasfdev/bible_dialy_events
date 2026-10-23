@@ -18,6 +18,7 @@ npm run build
 
 | Arquivo | Evidência exigida |
 | --- | --- |
+| `tests/subscription-access.test.ts` | Primeiro contato, texto exato, número do pagamento no privado, conciliação, renovação, pagamento de outro usuário/vencido, limite de consultas, falha do provedor, ausência de contato, cooldown, expiração na fila e auditoria dos membros antes do versículo |
 | `tests/deployment.test.ts` | Shell remoto real com Docker controlado: backup antes da troca, avanço de release só após saúde, rollback com falha preservada, limpeza do token e configuração obrigatória antes de parar o app |
 | `tests/payments.test.ts` | Fallback antes de cobrança, coalescência de chamadas concorrentes, checkout reutilizado, timeout pendente após reinício, titularidade da assinatura, eventos duplicados, valores/moeda canônicos, HMAC Mercado Pago, assinatura PagBank, cancelamento e expiração |
 | `tests/bot.test.ts` | Respostas só em DM, exclusão no grupo quando permitida, bloqueio para não assinantes, localização apenas em sessão pendente, exclusão de histórico, limites e delays de 2–5 s, disparo só para grupo/admin e remoção após reconexão |
@@ -98,7 +99,7 @@ Validação local de referência desta implementação (23/10/2026):
 
 | Verificação | Resultado |
 | --- | --- |
-| `npm run check` | 30 testes passaram; 0 falhos, cancelados ou skipped; tipagem e compilação aprovadas |
+| `npm run check` | 48 testes passaram; 0 falhos, cancelados ou skipped; tipagem e compilação aprovadas |
 | `actionlint`, `bash -n`, ShellCheck | Aprovados para o workflow e scripts |
 | Dockerfile, arquitetura amd64 | Imagem compilada com a CA confiável do proxy fornecida por secret de build; TLS permaneceu ativo |
 | Smoke Docker Compose | Caddy válido, HTTP aprovado, persistência após recriação, usuário não root, backup/restauração e integridade SQLite aprovados |
@@ -108,3 +109,15 @@ Validação local de referência desta implementação (23/10/2026):
 | WhatsApp, provedores e agendas reais | Homologação manual pendente de credenciais/fontes |
 
 Os resultados acima correspondem à validação local, não à execução hospedada no GitHub. Consulte o histórico do Actions após publicar e habilitar a pipeline para evidência do CI/deploy reais.
+
+
+## Homologar mensalidade e conciliação pelo bot
+
+1. Com um número novo de teste, envie “oi”: deve receber o pedido do número de pagamento no privado, sem orientação paga.
+2. Cadastre pelo fluxo da landing e conclua o checkout de teste; o webhook aprovado libera somente aquele cadastro. Se o webhook chegar antes do contato com o bot, não deve haver envio automático até o contato.
+3. Para simular entrega atrasada de webhook em homologação, consulte com `!pagamento <id real de teste>`. O provedor precisa confirmar titularidade, valor, moeda e vínculo; um número aleatório ou pertencente a outro usuário não pode liberar o acesso.
+4. Aguarde o período de teste vencer (ou use dados controlados em homologação). `!meoriente` e pedidos de culto devem ficar bloqueados; o aviso deve usar o texto exato do README. A sessão antiga não pode evitar a validação.
+5. Renove com uma cobrança nova e aprovada. O período deve ser atualizado e a orientação deve voltar. Reentregar o pagamento antigo não pode renovar o mês novamente.
+6. Antes de um disparo de teste, inclua uma conta sem acesso: ela deve ser removida. Se a remoção não for possível (por exemplo, um administrador sem assinatura) ou houver uma identidade não resolvida, o bot não pode publicar o versículo no grupo. Nunca usar participantes reais não consentidos nesses testes.
+
+Os testes automatizados verificam essas regras com provedores e WhatsApp controlados. Confirmação de pagamento real, pareamento, metadados de participantes e remoção na conta real continuam pendentes de homologação externa.

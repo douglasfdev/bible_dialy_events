@@ -20,6 +20,9 @@ Para desenvolvimento com recarga: `npm run dev`. Para configurações locais, co
 | Arquivo | Responsabilidade |
 | --- | --- |
 | `src/domain/payment/PaymentStrategy.ts` | Interface dos gateways, Mercado Pago, PagBank, fallback, conciliação de webhooks e idempotência |
+| `src/bot/BotMessageRouter.ts` | Primeiro contato, identificação do número e roteamento de pagamentos/atendimento |
+| `src/bot/handlers/PaymentReferenceHandler.ts` | Número do pagamento, consulta ao provedor e conciliação por titularidade |
+| `src/domain/payment/SubscriptionAccess.ts` | Regra de mensalidade vigente e proteção de respostas na fila |
 | `src/bot/handlers/OrientationsHandler.ts` | `!meoriente`, sessões privadas, histórico, `!esquecer` e localização |
 | `src/scraper/ChurchEventsScraper.ts` | Agendas JSON-LD, cache, busca de eventos do dia e Haversine |
 | `src/scraper/Geocoder.ts` | Geocodificação opcional Nominatim, cache de 30 dias e intervalo mínimo de 1,1 s |
@@ -110,3 +113,20 @@ O workflow único [.github/workflows/pipeline.yml](.github/workflows/pipeline.ym
 - [Procedimento de testes e homologação](docs/TESTING.md)
 
 O deploy só inicia depois de configurar a VM, arquivos de ambiente e secrets SSH. A aplicação continua precisando de credenciais e pareamento para validar integrações reais.
+
+
+## Mensalidade vigente e número do pagamento
+
+O número remetente precisa corresponder ao cadastro e ter status `ACTIVE` (ou `CANCELED` com período já pago ainda válido) e `current_period_end` no futuro. Sem pagamento confirmado ou renovação, o bot bloqueia orientação, busca de cultos e convites, e responde no privado:
+
+> desculpe, não encontramos seu pagamento, poderia informar o nº de pagamento, de sua mensalidade?
+
+Depois desse pedido, o usuário pode enviar apenas o identificador, ou usar `!pagamento 123456789` (ID do pagamento Mercado Pago) ou `!pagamento ORDE_…` (ID do pedido PagBank). O bot consulta o provedor do checkout vinculado, verifica aprovação, valor de R$ 5,99, moeda BRL, titularidade por referência do cadastro e vínculo com a assinatura/checkout. O identificador digitado, um comprovante ou a afirmação “já paguei” não liberam acesso sozinhos. Pagamento de outro cadastro, mês vencido ou provedor indisponível mantém o bloqueio. Até três consultas por número em 15 minutos são permitidas; duplicatas não concedem meses adicionais. A data de aprovação define o período, não o dia em que o comprovante foi informado. Uma mensalidade vencida não cria outra assinatura recorrente automaticamente: o contrato existente pode estar tentando renovar. Se ele já tiver sido encerrado definitivamente, a criação de outro contrato precisa de conciliação administrativa para não duplicar cobranças.
+
+A conciliação pelo bot exige um checkout/assinatura já vinculado ao cadastro. Tentativas financeiras de resultado incerto sem esse vínculo continuam exigindo a conciliação administrativa descrita acima. Os identificadores consultados são guardados em `payment_claims` para auditoria, separados do histórico de orientação e sem envio à IA.
+
+Avisos automáticos de pagamento e convites só são enviados depois de um contato iniciado pelo usuário (DM ou comando dirigido ao bot). Um webhook recebido antes disso mantém o convite na fila até o primeiro contato. Avisos automáticos de falta de pagamento são limitados a um por 24 horas; interações iniciadas pelo usuário recebem a resposta apropriada. O histórico de contato e as pendências são persistidos no SQLite, inclusive após reinício.
+
+Antes de cada versículo no grupo, o bot consulta os participantes e remove os números sem mensalidade vigente. Só o próprio bot é isento de assinatura; outros administradores também precisam ter acesso válido. Se uma remoção falhar ou um identificador não puder ser associado com segurança a um número (incluindo LIDs não resolvidos), o disparo no grupo é bloqueado. A conferência usa o estado confirmado pelos webhooks/consultas e os participantes informados pelo WhatsApp; a API não oferece uma operação atômica entre verificar membros e publicar. A aprovação de novos participantes continua obrigatória. Não há disparo diário de versículos para DMs.
+
+A validade também é conferida imediatamente antes de enviar respostas privadas, após o delay da fila. Assim, uma sessão aberta ou uma resposta de IA em andamento não estende uma mensalidade expirada. Quando a renovação é confirmada, o acesso volta e avisos antigos pendentes são descartados.

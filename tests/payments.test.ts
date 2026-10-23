@@ -79,3 +79,39 @@ test('expiration enqueues one revocation; cancellation preserves the paid period
   assert.equal(store.expire('2026-01-02T00:00:00.000Z'),1);assert.equal(store.expire('2026-01-02T00:00:00.000Z'),0);
   assert.equal(store.pendingDeliveries().filter(d=>d.kind === 'revoke').length,1); store.close();
 });
+test('payment reference lookup checks canonical owner, amount and subscription, not the supplied number alone',async()=>{
+  const {store,user}=fixture();const bound={...user,provider:'mercadopago' as const,subscription_id:'sub1'};
+  const previous=externalHttp.defaults.adapter;
+  const canonical={id:123,status:'approved',currency_id:'BRL',transaction_amount:5.99,external_reference:user.id,date_approved:new Date().toISOString()};
+  let requests=0;
+  externalHttp.defaults.adapter=(async config=>{
+    requests++;
+    return {data:config.url!.includes('/v1/payments/') ? canonical : {id:'sub1',external_reference:user.id,auto_recurring:{currency_id:'BRL',transaction_amount:5.99}},status:200,statusText:'OK',headers:{},config};
+  }) satisfies AxiosAdapter;
+  try {
+    const gateway=new MercadoPagoGateway(cfg({MERCADOPAGO_ACCESS_TOKEN:'test-token'}));
+    const event=await gateway.verifyPayment('123',bound);assert.equal(event.kind,'paid');assert.equal(event.userId,user.id);assert.equal(event.id,'mp:payment:123');
+    canonical.external_reference='other-user';assert.equal((await gateway.verifyPayment('123',bound)).kind,'ignored');
+    canonical.external_reference=user.id;canonical.transaction_amount=1;assert.equal((await gateway.verifyPayment('123',bound)).kind,'ignored');
+    const before=requests;assert.equal((await gateway.verifyPayment('../other',bound)).kind,'ignored');assert.equal(requests,before);
+  } finally {externalHttp.defaults.adapter=previous;store.close();}
+});
+test('PagBank payment reference is reconciled against its canonical paid order and checkout',async()=>{
+  const {store,user}=fixture();const previous=externalHttp.defaults.adapter;
+  const gateway=new PagSeguroGateway(cfg({PAGSEGURO_TOKEN:'test-token'}));gateway.lookupCheckout=id=>{assert.equal(id,user.id);return 'CHEC_1';};
+  externalHttp.defaults.adapter=(async config=>({data:config.url!.includes('/orders/') ? {
+    id:'ORDE_1',reference_id:user.id,charges:[{id:'CHAR_1',status:'PAID',paid_at:new Date().toISOString(),amount:{value:599,currency:'BRL'}}],
+  } : {id:'CHEC_1',reference_id:user.id,orders:[{id:'ORDE_1'}]},status:200,statusText:'OK',headers:{},config})) satisfies AxiosAdapter;
+  try {
+    const event=await gateway.verifyPayment('ORDE_1',{...user,provider:'pagseguro',subscription_id:'CHEC_1'});
+    assert.equal(event.kind,'paid');assert.equal(event.userId,user.id);assert.equal(event.subscriptionId,'CHEC_1');assert.equal(event.id,'pagbank:CHAR_1');
+  } finally {externalHttp.defaults.adapter=previous;store.close();}
+});
+test('an expired recurring month does not create a second recurring agreement',async()=>{
+  const {store,user}=fixture();const primary=new FakeGateway('mercadopago');
+  const service=new PaymentService(primary,new FakeGateway('pagseguro'),store);
+  await service.createSubscription(user);store.activate('old-paid',user,'2020-01-01T00:00:00.000Z');
+  store.db.prepare("UPDATE checkouts SET created_at='2019-12-01T00:00:00.000Z' WHERE user_id=?").run(user.id);
+  const checkout=await service.createSubscription(store.userById(user.id)!);
+  assert.equal(checkout.id,'subscription-1');assert.equal(primary.calls,1);store.close();
+});

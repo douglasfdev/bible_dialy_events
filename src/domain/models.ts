@@ -18,5 +18,5 @@ export function addMonth(date: Date): string {
   d.setUTCDate(Math.min(day, last)); return d.toISOString();
 }
 export function isEntitled(user: User | undefined, now = Date.now()): user is User {
-  return !!user?.current_period_end && Date.parse(user.current_period_end) > now;
+  return !!user && (user.status === 'ACTIVE' || user.status === 'CANCELED') && !!user.current_period_end && Date.parse(user.current_period_end) > now;
 }

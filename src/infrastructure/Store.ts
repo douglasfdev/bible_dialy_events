@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
+import { PAYMENT_NOT_FOUND_MESSAGE } from '../domain/payment/messages.js';
 import type { ChatMessage, ChurchEvent, Provider, User } from '../domain/models.js';
 export class Store {
   readonly db: DatabaseSync;
@@ -24,8 +25,41 @@ export class Store {
       CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY, kind TEXT NOT NULL, recipient TEXT NOT NULL,
         content TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS broadcasts(id TEXT PRIMARY KEY, state TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS incoming_messages(id TEXT PRIMARY KEY,created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS bot_contacts(phone TEXT PRIMARY KEY,first_contact_at INTEGER NOT NULL,
+        last_contact_at INTEGER NOT NULL,awaiting_payment_reference INTEGER NOT NULL DEFAULT 0,last_payment_prompt_at INTEGER);
+      CREATE TABLE IF NOT EXISTS payment_claims(id TEXT PRIMARY KEY,phone TEXT NOT NULL,provider TEXT NOT NULL,
+        payment_reference TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS payment_claims_phone_idx ON payment_claims(phone,created_at);
     `);
   }
+  recordBotContact(phone:string):boolean {
+    const now=Date.now();
+    const added=this.db.prepare('INSERT OR IGNORE INTO bot_contacts(phone,first_contact_at,last_contact_at) VALUES(?,?,?)').run(phone,now,now).changes;
+    if(!added) this.db.prepare('UPDATE bot_contacts SET last_contact_at=? WHERE phone=?').run(now,phone);
+    return !!added;
+  }
+  hasBotContact(phone:string):boolean { return !!this.db.prepare('SELECT 1 FROM bot_contacts WHERE phone=?').get(phone); }
+  awaitPaymentReference(phone:string):void { this.db.prepare('UPDATE bot_contacts SET awaiting_payment_reference=1 WHERE phone=?').run(phone); }
+  clearPaymentReference(phone:string):void { this.db.prepare('UPDATE bot_contacts SET awaiting_payment_reference=0 WHERE phone=?').run(phone); }
+  awaitingPaymentReference(phone:string):boolean {
+    return !!this.db.prepare('SELECT 1 FROM bot_contacts WHERE phone=? AND awaiting_payment_reference=1').get(phone);
+  }
+  markPaymentPrompt(phone:string):void { this.db.prepare('UPDATE bot_contacts SET last_payment_prompt_at=? WHERE phone=?').run(Date.now(),phone); }
+  canNotifyMissingPayment(phone:string):boolean {
+    return !!this.db.prepare('SELECT 1 FROM bot_contacts WHERE phone=? AND (last_payment_prompt_at IS NULL OR last_payment_prompt_at<=?)').get(phone,Date.now()-86400000);
+  }
+  queuePaymentReminder(phone:string):void {
+    if(!this.hasBotContact(phone)) return;
+    this.enqueue(`payment-missing:${phone}:${new Date().toISOString().slice(0,10)}`,'payment_missing',phone,PAYMENT_NOT_FOUND_MESSAGE);
+  }
+  recentPaymentClaims(phone:string):number {
+    return Number(this.db.prepare('SELECT COUNT(*) AS n FROM payment_claims WHERE phone=? AND created_at>?').get(phone,Date.now()-15*60000)?.n ?? 0);
+  }
+  paymentClaim(phone:string,provider:Provider,reference:string):string {
+    const id=randomUUID();this.db.prepare('INSERT INTO payment_claims VALUES(?,?,?,?,?,?)').run(id,phone,provider,reference,'PENDING',Date.now());return id;
+  }
+  finishPaymentClaim(id:string,status:'VERIFIED'|'NOT_FOUND'|'UNAVAILABLE'):void { this.db.prepare('UPDATE payment_claims SET status=? WHERE id=?').run(status,id); }
   close(): void { this.db.close(); }
   userByPhone(phone: string): User | undefined { return this.db.prepare('SELECT * FROM users WHERE phone=?').get(phone) as unknown as User | undefined; }
   userById(id: string): User | undefined { return this.db.prepare('SELECT * FROM users WHERE id=?').get(id) as unknown as User | undefined; }
@@ -57,6 +91,7 @@ export class Store {
       if (!added) { this.db.exec('COMMIT'); return false; }
       // Never shorten paid access when duplicate/out-of-order events arrive.
       this.db.prepare(`UPDATE users SET status='ACTIVE', current_period_end=MAX(COALESCE(current_period_end,''),?) WHERE id=?`).run(periodEnd,user.id);
+      this.db.prepare('UPDATE bot_contacts SET awaiting_payment_reference=0 WHERE phone=?').run(user.phone);
       this.enqueue(`welcome:${eventId}`, 'welcome', user.phone, 'Seu pagamento foi confirmado. Seu acesso à comunidade está disponível.');
       this.db.exec('COMMIT'); return true;
     } catch(e) { this.db.exec('ROLLBACK'); throw e; }
@@ -68,7 +103,7 @@ export class Store {
     try {
       for (const user of users) {
         this.db.prepare("UPDATE users SET status='OVERDUE' WHERE id=?").run(user.id);
-        this.enqueue(`revoke:${user.id}:${user.current_period_end}`, 'revoke',user.phone,'Seu período de acesso terminou. Renove para voltar à comunidade.');
+        this.enqueue(`revoke:${user.id}:${user.current_period_end}`, 'revoke',user.phone,PAYMENT_NOT_FOUND_MESSAGE);
       }
       this.db.exec('COMMIT'); return users.length;
     } catch(e) { this.db.exec('ROLLBACK'); throw e; }
@@ -76,8 +111,10 @@ export class Store {
   enqueue(id: string, kind: string, phone: string, content: string): void {
     this.db.prepare('INSERT OR IGNORE INTO deliveries(id,kind,recipient,content) VALUES(?,?,?,?)').run(id,kind,phone,content);
   }
-  pendingDeliveries(): { id: string; kind: string; recipient: string; content: string }[] {
-    return this.db.prepare('SELECT * FROM deliveries WHERE delivered=0 ORDER BY rowid LIMIT 20').all() as ReturnType<Store['pendingDeliveries']>;
+  hasPendingWelcome(phone:string):boolean { return !!this.db.prepare("SELECT 1 FROM deliveries WHERE recipient=? AND kind='welcome' AND delivered=0").get(phone); }
+  pendingDeliveries(readyOnly=false): { id: string; kind: string; recipient: string; content: string }[] {
+    return this.db.prepare(`SELECT * FROM deliveries WHERE delivered=0
+      AND (?=0 OR kind!='welcome' OR EXISTS(SELECT 1 FROM bot_contacts WHERE phone=recipient)) ORDER BY rowid LIMIT 20`).all(Number(readyOnly)) as ReturnType<Store['pendingDeliveries']>;
   }
   delivered(id: string): void { this.db.prepare('UPDATE deliveries SET delivered=1 WHERE id=?').run(id); }
   deliveryFailed(id: string): void { this.db.prepare('UPDATE deliveries SET attempts=attempts+1 WHERE id=?').run(id); }

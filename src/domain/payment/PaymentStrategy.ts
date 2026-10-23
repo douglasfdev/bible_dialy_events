@@ -2,7 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import axios from 'axios';
 import { z } from 'zod';
 import type { Config } from '../../config.js';
-import { addMonth, type Provider, type User } from '../models.js';
+import { addMonth, isEntitled, type Provider, type User } from '../models.js';
 import { Store } from '../../infrastructure/Store.js';
 import { externalHttp, ServiceError } from '../../infrastructure/http.js';
 export interface Checkout { id: string; url: string; provider: Provider; billingMode: 'recurring' | 'one_time' }
@@ -12,6 +12,7 @@ export interface IPaymentGateway {
   readonly provider: Provider;
   createSubscription(user: User): Promise<Checkout>;
   processWebhook(input: WebhookInput): Promise<PaymentEvent>;
+  verifyPayment(reference:string,user:User):Promise<PaymentEvent>;
 }
 export class UnavailableBeforeCreation extends ServiceError {}
 const object = z.record(z.string(),z.unknown());
@@ -42,6 +43,19 @@ export class MercadoPagoGateway implements IPaymentGateway {
     },{ headers:{...this.headers(),'X-Idempotency-Key':createHash('sha256').update(`${user.id}:${user.current_period_end ?? 'initial'}`).digest('hex')} });
     const data = checkoutSchema.parse(result.data);
     return {id:data.id,url:data.init_point,provider:this.provider,billingMode:'recurring'};
+  }
+  async verifyPayment(reference:string,user:User):Promise<PaymentEvent> {
+    if(!this.cfg.MERCADOPAGO_ACCESS_TOKEN) throw new ServiceError('Consulta de pagamentos indisponível');
+    if(!/^\d{1,30}$/.test(reference) || !user.subscription_id) return ignored();
+    const {data}=await externalHttp.get(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(reference)}`,{headers:this.headers()});
+    const payment=z.object({id:z.union([z.string(),z.number()]),status:z.string(),currency_id:z.string(),transaction_amount:z.number(),
+      external_reference:z.string().nullable(),date_approved:z.iso.datetime({offset:true}).nullable()}).parse(data);
+    if(String(payment.id)!==reference || payment.status!=='approved' || payment.currency_id!=='BRL' || payment.transaction_amount!==5.99 ||
+      payment.external_reference!==user.id || !payment.date_approved || Date.parse(payment.date_approved)>Date.now()) return ignored();
+    const sub=z.object({id:z.string(),external_reference:z.string(),auto_recurring:z.object({currency_id:z.literal('BRL'),transaction_amount:z.literal(5.99)})})
+      .parse((await externalHttp.get(`https://api.mercadopago.com/preapproval/${encodeURIComponent(user.subscription_id)}`,{headers:this.headers()})).data);
+    if(sub.id!==user.subscription_id || sub.external_reference!==user.id) return ignored();
+    return {id:`mp:payment:${payment.id}`,subscriptionId:sub.id,userId:user.id,kind:'paid',periodEnd:addMonth(new Date(payment.date_approved))};
   }
   async processWebhook(input: WebhookInput): Promise<PaymentEvent> {
     if(!this.cfg.MERCADOPAGO_WEBHOOK_SECRET) throw new ServiceError('Webhook não configurado');
@@ -107,8 +121,13 @@ export class PagSeguroGateway implements IPaymentGateway {
     const expected = createHash('sha256').update(`${this.cfg.PAGSEGURO_TOKEN}-${input.rawBody}`).digest('hex');
     if(!secureEqual(input.headers['x-authenticity-token'] ?? '',expected)) throw new ServiceError('Assinatura inválida',401,'INVALID_SIGNATURE');
     const body = z.object({id:z.string()}).parse(input.body);
-    if(!body.id.startsWith('ORDE_')) return ignored();
-    const {data} = await externalHttp.get(`${this.base}/orders/${encodeURIComponent(body.id)}`,{headers:this.headers()});
+    return this.canonicalOrder(body.id);
+  }
+  async verifyPayment(reference:string,_user:User):Promise<PaymentEvent> { return this.canonicalOrder(reference); }
+  private async canonicalOrder(reference:string):Promise<PaymentEvent> {
+    if(!this.cfg.PAGSEGURO_TOKEN) throw new ServiceError('Consulta de pagamentos indisponível');
+    if(!/^ORDE_[A-Z0-9-]{1,80}$/i.test(reference)) return ignored();
+    const {data} = await externalHttp.get(`${this.base}/orders/${encodeURIComponent(reference)}`,{headers:this.headers()});
     const order = z.object({id:z.string(),reference_id:z.string(),charges:z.array(z.object({id:z.string(),status:z.string(),paid_at:z.iso.datetime({offset:true}).optional(),amount:z.object({value:z.number(),currency:z.string()})}))}).parse(data);
     const paid = order.charges.find(c => c.status === 'PAID' && c.amount.value === 599 && c.amount.currency === 'BRL' && c.paid_at);
     if(!paid?.paid_at) return ignored();
@@ -133,7 +152,8 @@ export class PaymentService {
   }
   private async create(user: User): Promise<Checkout> {
     let cached = this.store.checkout(user.id);
-    if(cached && user.current_period_end && Date.parse(user.current_period_end)<=Date.now() && Date.parse(cached.created_at)<Date.parse(user.current_period_end)) {
+    // A recurring agreement may still retry renewal. Never create a second one just because the month expired.
+    if(cached && cached.billing_mode==='one_time' && user.current_period_end && Date.parse(user.current_period_end)<=Date.now() && Date.parse(cached.created_at)<Date.parse(user.current_period_end)) {
       this.store.db.exec('BEGIN IMMEDIATE');
       try {
         this.store.db.prepare('DELETE FROM checkouts WHERE user_id=?').run(user.id);
@@ -157,6 +177,29 @@ export class PaymentService {
       if(e instanceof UnavailableBeforeCreation)
         this.store.db.prepare('DELETE FROM payment_attempts WHERE user_id=?').run(user.id);
       throw e;
+    }
+  }
+  async reconcilePayment(phone:string,reference:string,provider?:Provider):Promise<boolean> {
+    const user=this.store.userByPhone(phone);
+    if(!user?.provider || !user.subscription_id || (provider && provider!==user.provider)) return false;
+    if(!(user.provider==='mercadopago' ? /^\d{1,30}$/.test(reference) : /^ORDE_[A-Z0-9-]{1,80}$/i.test(reference))) return false;
+    if(this.store.recentPaymentClaims(phone)>=3) throw new ServiceError('Aguarde 15 minutos antes de consultar novamente.',429,'PAYMENT_LOOKUP_RATE_LIMIT');
+    const claim=this.store.paymentClaim(phone,user.provider,reference);
+    const gateway=user.provider===this.primary.provider ? this.primary : this.fallback;
+    try {
+      const event=await gateway.verifyPayment(reference,user);
+      if(event.kind!=='paid' || event.userId!==user.id || event.subscriptionId!==user.subscription_id || !event.periodEnd ||
+        !Number.isFinite(Date.parse(event.periodEnd)) || Date.parse(event.periodEnd)<=Date.now()) {
+        this.store.finishPaymentClaim(claim,'NOT_FOUND');return false;
+      }
+      this.store.activate(event.id,user,event.periodEnd);
+      const verified=isEntitled(this.store.userByPhone(phone));
+      if(verified) this.store.clearPaymentReference(phone);
+      this.store.finishPaymentClaim(claim,verified ? 'VERIFIED' : 'NOT_FOUND');return verified;
+    } catch(error) {
+      if(axios.isAxiosError(error) && error.response?.status===404) { this.store.finishPaymentClaim(claim,'NOT_FOUND');return false; }
+      this.store.finishPaymentClaim(claim,'UNAVAILABLE');
+      throw new ServiceError('Não foi possível consultar seu pagamento agora. Tente novamente mais tarde.');
     }
   }
   async processWebhook(gateway: IPaymentGateway,input: WebhookInput): Promise<void> {

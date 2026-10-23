@@ -9,7 +9,7 @@ import { ChurchEventsScraper } from '../src/scraper/ChurchEventsScraper.js';
 import { cfg,FakeTransport } from './helpers.js';
 const phone='5511999999999'; const jid=`${phone}@s.whatsapp.net`;
 function fixture(active=true) {
-  const store=new Store(':memory:');const user=store.lead('Ana',phone,'ana@example.com');
+  const store=new Store(':memory:');const user=store.lead('Ana',phone,'ana@example.com');store.recordBotContact(phone);
   if(active) store.activate('paid',user,'2099-01-01T00:00:00.000Z');
   const transport=new FakeTransport();const messenger=new SafeMessenger(transport,async()=>{});
   const advisor={calls:0,async reply(){this.calls++;return 'Estou aqui para ouvir você.';}};

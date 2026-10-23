@@ -1,7 +1,7 @@
 import makeWASocket, { DisconnectReason, jidNormalizedUser, useMultiFileAuthState, type WASocket, type WAMessageKey, normalizeMessageContent } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
-import type { IncomingMessage, WhatsAppTransport } from './transport.js';
+import type { GroupParticipant, IncomingMessage, WhatsAppTransport } from './transport.js';
 export class BaileysTransport implements WhatsAppTransport {
   private socket?: WASocket;
   private ready = false;
@@ -63,6 +63,15 @@ export class BaileysTransport implements WhatsAppTransport {
   async sendPrivate(recipientId: string,text: string): Promise<void> {
     if(!/^\d{8,15}@s\.whatsapp\.net$/.test(recipientId)) throw new Error('Destinatário privado inválido');
     await this.active().sendMessage(recipientId,{text});
+  }
+  async groupParticipants(groupId:string):Promise<GroupParticipant[]> {
+    if(!this.allowedGroups.includes(groupId)) throw new Error('Grupo não autorizado');
+    const socket=this.active();const own=jidNormalizedUser(socket.user?.id ?? '');
+    const metadata=await socket.groupMetadata(groupId);
+    return metadata.participants.map(participant=>{
+      const id=jidNormalizedUser(participant.id);
+      return {id,isSelf:id===own,phone:/^\d{8,15}@s\.whatsapp\.net$/.test(id) ? id.split('@')[0] : undefined};
+    });
   }
   async isGroupAdmin(groupId: string): Promise<boolean> {
     if(!this.allowedGroups.includes(groupId) || !groupId.endsWith('@g.us')) return false;
