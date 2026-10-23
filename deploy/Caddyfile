@@ -1,0 +1,9 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+	# No trusted upstream proxies: Caddy ignores client-supplied forwarded headers.
+	reverse_proxy app:3000
+}

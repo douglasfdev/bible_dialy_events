@@ -6,3 +6,10 @@ dist/
 data/
 *.log
 coverage/
+# Configuração e artefatos locais de deploy
+deploy/app.env
+deploy/compose.env
+.deploy.env
+reports/
+*.pem
+*.key

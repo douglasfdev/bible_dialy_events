@@ -99,3 +99,14 @@ npm_config_cache=/workspace/.npm npm audit --omit=dev --audit-level=high
 ```
 
 Antes de abrir inscrições reais: homologar os provedores e o número WhatsApp, cadastrar fontes verificadas, validar a remoção/aprovação no grupo real e completar a identificação do responsável/canal de atendimento no aviso de privacidade. O trabalho entregue é uma base funcional de desenvolvimento; integrações externas e operação comercial não estão declaradas prontas.
+
+
+## Pipeline e deployment
+
+O workflow único [.github/workflows/pipeline.yml](.github/workflows/pipeline.yml) executa tipagem, testes, build Docker e smoke com Compose. Push em `main` publica a imagem multiarch no GHCR; com `ENABLE_ORACLE_DEPLOY=true`, faz deploy por SSH na VM Oracle, com backup e tentativa de rollback.
+
+- [Configuração completa, variáveis e operação](docs/DEPLOYMENT.md)
+- [Diagramas de pipeline e arquitetura](docs/ARCHITECTURE.md)
+- [Procedimento de testes e homologação](docs/TESTING.md)
+
+O deploy só inicia depois de configurar a VM, arquivos de ambiente e secrets SSH. A aplicação continua precisando de credenciais e pareamento para validar integrações reais.

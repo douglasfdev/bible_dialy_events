@@ -1,0 +1,64 @@
+name: bible-daily-events
+services:
+  app:
+    image: ${APP_IMAGE:-bible-daily-events:local}
+    build:
+      context: .
+      target: runtime
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    env_file:
+      - path: ${APP_ENV_FILE:-./deploy/app.env}
+        required: true
+        format: raw
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATA_DIR: /app/data
+      EVENT_SOURCES_FILE: /app/config/event-sources.json
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+    expose:
+      - "3000"
+    volumes:
+      - app_data:/app/data
+      - ${EVENT_SOURCES_PATH:-./docs/event-sources.example.json}:/app/config/event-sources.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  caddy:
+    image: caddy:2.10-alpine
+    profiles: [proxy]
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  app_data:
+    name: ${DATA_VOLUME_NAME:-bible-daily-events-data}
+  caddy_data:
+  caddy_config:

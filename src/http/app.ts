@@ -12,7 +12,7 @@ const leadSchema=z.object({name:z.string().trim().min(2).max(100),
   phone:z.string().regex(/^\+?[1-9]\d{7,14}$/).transform(s=>s.replace(/^\+/,'')),
   email:z.email().max(254),consent:z.literal(true)});
 export function createApp(cfg: Config,store: Store,payments: PaymentService,gateways: IPaymentGateway[],transport: WhatsAppTransport) {
-  const app=express(); app.disable('x-powered-by'); app.use(helmet());
+  const app=express(); app.disable('x-powered-by'); app.set('trust proxy',cfg.TRUST_PROXY); app.use(helmet());
   app.use(express.json({limit:'32kb',verify:(req,_res,buf)=>{(req as typeof req & {rawBody:string}).rawBody=buf.toString('utf8');}}));
   app.get('/health',(_req,res)=>res.json({status:'ok',whatsapp:transport.connected ? 'connected' : cfg.WHATSAPP_ENABLED ? 'disconnected' : 'disabled',
     paymentsConfigured:!!cfg.MERCADOPAGO_ACCESS_TOKEN,aiConfigured:!!cfg.OPENAI_API_KEY}));

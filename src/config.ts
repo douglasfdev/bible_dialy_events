@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { z } from 'zod';
 const bool = z.enum(['true', 'false']).transform(v => v === 'true');
 const schema = z.object({
+  TRUST_PROXY: z.coerce.number().int().min(0).max(1).default(0),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   PUBLIC_URL: z.url().default('http://localhost:3000'),
   DATA_DIR: z.string().default('./data'),
