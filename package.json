@@ -1,0 +1,35 @@
+{
+  "name": "bible-daily-events",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.0.0 <25" },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node --enable-source-maps dist/src/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.7.24",
+    "axios": "^1.12.0",
+    "cheerio": "^1.1.2",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "helmet": "^8.1.0",
+    "node-cron": "^4.2.1",
+    "pino": "^9.9.0",
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.5.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
