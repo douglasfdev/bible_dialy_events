@@ -1,4 +1,4 @@
-# Palavra Diária
+# Palavra Diária e Eventos
 
 Base SaaS em TypeScript para apoio espiritual via WhatsApp, criada neste repositório a partir da especificação. Node.js 24, Express 5, SQLite persistente, Baileys, OpenAI, axios/cheerio e node-cron. Preço: R$ 5,99.
 
