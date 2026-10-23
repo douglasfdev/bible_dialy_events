@@ -110,7 +110,7 @@ jobs:
     name: Deploy via SSH to Oracle VM
     needs: image
     if: >-
-      github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main'
       && vars.ENABLE_ORACLE_DEPLOY == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
